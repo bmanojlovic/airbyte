@@ -7,13 +7,13 @@ from typing import List, Tuple
 
 import anyio
 from airbyte_protocol.models.airbyte_protocol import ConnectorSpecification
+from dagger import Container, ExecError, File, ImageLayerCompression, QueryError
 from pipelines import builds, consts
 from pipelines.actions import environments
 from pipelines.actions.remote_storage import upload_to_gcs
 from pipelines.bases import ConnectorReport, Step, StepResult, StepStatus
 from pipelines.contexts import PublishConnectorContext
 from pipelines.pipelines import metadata
-from dagger import Container, ExecError, File, ImageLayerCompression, QueryError
 from pydantic import ValidationError
 
 
@@ -174,7 +174,7 @@ class UploadSpecToCache(Step):
         return self._parse_spec_output(spec_output)
 
     async def _get_spec_as_file(self, spec: str, name="spec_to_cache.json") -> File:
-        return (await self.context.get_connector_dir()).with_new_file(name, spec).file(name)
+        return (await self.context.get_connector_dir()).with_new_file(name, contents=spec).file(name)
 
     async def _run(self, built_connector: Container) -> StepResult:
         try:
@@ -186,7 +186,7 @@ class UploadSpecToCache(Step):
         specs_to_uploads: List[Tuple[str, File]] = [(self.oss_spec_key, await self._get_spec_as_file(oss_spec))]
 
         if oss_spec != cloud_spec:
-            specs_to_uploads.append(self.cloud_spec_key, await self._get_spec_as_file(cloud_spec, "cloud_spec_to_cache.json"))
+            specs_to_uploads.append((self.cloud_spec_key, await self._get_spec_as_file(cloud_spec, "cloud_spec_to_cache.json")))
 
         for key, file in specs_to_uploads:
             exit_code, stdout, stderr = await upload_to_gcs(
@@ -307,8 +307,10 @@ def reorder_contexts(contexts: List[PublishConnectorContext]) -> List[PublishCon
     Non strict-encrypt variant reference the strict-encrypt variant in their metadata file for cloud.
     So if we publish the non strict-encrypt variant first, the metadata upload will fail if the strict-encrypt variant is not published yet.
     As strict-encrypt variant are often modified in the same PR as the non strict-encrypt variant, we want to publish them first.
-    This is an hacky approach: as connector names with -strict-encrypt/secure prefix are longer,
-    they will be sorted first with our reverse sort below.
     """
 
-    return sorted(contexts, key=lambda context: context.connector.technical_name, reverse=True)
+    def is_secure_variant(context: PublishConnectorContext) -> bool:
+        SECURE_VARIANT_KEYS = ["secure", "strict-encrypt"]
+        return any(key in context.connector.technical_name for key in SECURE_VARIANT_KEYS)
+
+    return sorted(contexts, key=lambda context: (is_secure_variant(context), context.connector.technical_name), reverse=True)
